@@ -1,7 +1,7 @@
-# Folderul unde CMake va genera fișierele compilate
+# Folderul unde CMake va genera fisierele compilate
 build/
 
-# Fisiere executabile (dacă sunt generate direct in root)
+# Fisiere executabile (daca sunt generate direct in root)
 dhcp_server
 *.out
 *.exe
@@ -10,8 +10,8 @@ dhcp_server
 *.o
 *.obj
 
-# Configurațiile locale VS Code (opțional, pentru a nu suprascrie setările colegei tale)
+# Configuratiile locale VS Code
 .vscode/
 
-# Fisiere de lease generate de serverul tău la runtime (pentru viitor)
+# Fisiere de lease generate
 *.leases
