@@ -6,6 +6,7 @@
 #include <netinet/in.h>
 #include "NetworkSocket.hpp"
 #include "DhcpPacket.hpp"
+#include <arpa/inet.h>
 
 int main() {
     std::string interface = "ens37";
@@ -45,6 +46,81 @@ int main() {
                 auto msgType = packet.getOption(53);
                 if (!msgType.empty()) {
                     std::cout << "    Tip Mesaj DHCP (Opt 53): " << (int)msgType[0] << std::endl;
+
+                    // Dacă este DHCPDISCOVER (1), răspundem cu DHCPOFFER (2)
+                    if (msgType[0] == 1) {
+                        std::cout << "    => Am detectat DHCPDISCOVER. Construiesc DHCPOFFER..." << std::endl;
+
+                        DhcpPacket offer;
+                        offer.header = packet.header; // Pastram xid-ul (Transaction ID) și MAC-ul clientului
+                        
+                        offer.header.op = 2; // BOOTREPLY (Serverul răspunde)
+                        // Oferim clientului IP-ul 192.168.100.10 (momentan nu este o selectie dinamica, e doar de testing)
+                        offer.header.yiaddr = inet_addr("192.168.100.10");
+                        // Ne identificam pe noi ca server
+                        offer.header.siaddr = inet_addr("192.168.100.1");
+
+                        // Adaugam Optiunile DHCP specifice ofertei
+                        offer.addOption(53, {2}); // Tip Mesaj: DHCPOFFER
+                        offer.addOption(1, {255, 255, 255, 0}); // Subnet Mask
+                        offer.addOption(54, {192, 168, 100, 1}); // Server Identifier
+                        offer.addOption(51, {0x00, 0x00, 0x0E, 0x10}); // Lease Time: 3600 secunde (1 oră)
+
+                        auto responseBuffer = offer.serialize();
+
+                        // Pregatim adresa de destinatie: Broadcast pe portul Clientului (68)
+                        struct sockaddr_in bcast_addr{};
+                        bcast_addr.sin_family = AF_INET;
+                        bcast_addr.sin_port = htons(68);
+                        bcast_addr.sin_addr.s_addr = inet_addr("255.255.255.255");
+
+                        ssize_t sent = sendto(sockfd, responseBuffer.data(), responseBuffer.size(), 0,
+                                            (struct sockaddr*)&bcast_addr, sizeof(bcast_addr));
+                        
+                        if (sent > 0) {
+                            std::cout << "    [+] DHCPOFFER trimis cu succes (" << sent << " octeti)!" << std::endl;
+                        } else {
+                            perror("    [-] Eroare la trimiterea DHCPOFFER");
+                        }
+                    }
+                    else if (msgType[0] == 3) {
+                        std::cout << "    => Am detectat DHCPREQUEST. Construiesc DHCPACK..." << std::endl;
+
+                        DhcpPacket ack;
+                        ack.header = packet.header; // Păstrăm xid-ul și MAC-ul clientului
+                        
+                        ack.header.op = 2; // BOOTREPLY
+                        // Confirmam adresa IP alocată
+                        ack.header.yiaddr = inet_addr("192.168.100.10"); // nu este o selectie dinamica, este doar de testing
+                        ack.header.siaddr = inet_addr("192.168.100.1");
+
+                        // Adaugam Opțiunile DHCP specifice confirmarii
+                        ack.addOption(53, {5}); // Tip Mesaj: DHCPACK (5)
+                        ack.addOption(1, {255, 255, 255, 0}); // Subnet Mask
+                        ack.addOption(54, {192, 168, 100, 1}); // Server Identifier
+                        ack.addOption(51, {0x00, 0x00, 0x0E, 0x10}); // Lease Time: 3600 secunde
+                        
+                        // Optional: Putem oferi acum si Default Gateway (Opt 3) și un server DNS (Opt 6)
+                        ack.addOption(3, {192, 168, 100, 1}); // Router / Gateway
+                        ack.addOption(6, {8, 8, 8, 8}); // DNS (aceste este DNS-ul de la Google)
+
+                        auto responseBuffer = ack.serialize();
+
+                        // Destinatia este tot Broadcast pe portul 68
+                        struct sockaddr_in bcast_addr{};
+                        bcast_addr.sin_family = AF_INET;
+                        bcast_addr.sin_port = htons(68);
+                        bcast_addr.sin_addr.s_addr = inet_addr("255.255.255.255");
+
+                        ssize_t sent = sendto(sockfd, responseBuffer.data(), responseBuffer.size(), 0,
+                                            (struct sockaddr*)&bcast_addr, sizeof(bcast_addr));
+                        
+                        if (sent > 0) {
+                            std::cout << "    [+] DHCPACK trimis cu succes (" << sent << " octeti)!" << std::endl;
+                        } else {
+                            perror("    [-] Eroare la trimiterea DHCPACK");
+                        }
+                    }
                 }
                 std::cout << "--------------------------------------------------\n";
             }

@@ -51,6 +51,24 @@ std::vector<uint8_t> DhcpPacket::getOption(uint8_t code) const {
     return {}; // Optiunea nu a fost gasita
 }
 
-// Lasam aceste doua functii goale momentan, le vom scrie cand implementam raspunsul (DHCPOFFER)
-std::vector<uint8_t> DhcpPacket::serialize() const { return {}; }
-void DhcpPacket::addOption(uint8_t code, const std::vector<uint8_t>& data) {}
+void DhcpPacket::addOption(uint8_t code, const std::vector<uint8_t>& data) {
+    options.push_back(code);
+    options.push_back(static_cast<uint8_t>(data.size()));
+    options.insert(options.end(), data.begin(), data.end());
+}
+
+std::vector<uint8_t> DhcpPacket::serialize() const {
+    std::vector<uint8_t> buffer;
+    
+    // 1. Facem loc si copiem headerul fix (inclusiv magic cookie)
+    buffer.resize(sizeof(DhcpHeader));
+    std::memcpy(buffer.data(), &header, sizeof(DhcpHeader));
+
+    // 2. Adaugam optiunile existente
+    buffer.insert(buffer.end(), options.begin(), options.end());
+
+    // 3. Adaugăm optiunea END (255) pentru a marca finalul pachetului
+    buffer.push_back(255);
+    
+    return buffer;
+}
