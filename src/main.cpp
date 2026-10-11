@@ -47,14 +47,14 @@ int main() {
                 if (!msgType.empty()) {
                     std::cout << "    Tip Mesaj DHCP (Opt 53): " << (int)msgType[0] << std::endl;
 
-                    // Dacă este DHCPDISCOVER (1), răspundem cu DHCPOFFER (2)
+                    // Daca este DHCPDISCOVER (1), raspundem cu DHCPOFFER (2)
                     if (msgType[0] == 1) {
                         std::cout << "    => Am detectat DHCPDISCOVER. Construiesc DHCPOFFER..." << std::endl;
 
                         DhcpPacket offer;
                         offer.header = packet.header; // Pastram xid-ul (Transaction ID) și MAC-ul clientului
                         
-                        offer.header.op = 2; // BOOTREPLY (Serverul răspunde)
+                        offer.header.op = 2; // BOOTREPLY (Serverul raspunde)
                         // Oferim clientului IP-ul 192.168.100.10 (momentan nu este o selectie dinamica, e doar de testing)
                         offer.header.yiaddr = inet_addr("192.168.100.10");
                         // Ne identificam pe noi ca server
@@ -64,7 +64,7 @@ int main() {
                         offer.addOption(53, {2}); // Tip Mesaj: DHCPOFFER
                         offer.addOption(1, {255, 255, 255, 0}); // Subnet Mask
                         offer.addOption(54, {192, 168, 100, 1}); // Server Identifier
-                        offer.addOption(51, {0x00, 0x00, 0x0E, 0x10}); // Lease Time: 3600 secunde (1 oră)
+                        offer.addOption(51, {0x00, 0x00, 0x0E, 0x10}); // Lease Time: 3600 secunde (1 ora)
 
                         auto responseBuffer = offer.serialize();
 
@@ -87,10 +87,10 @@ int main() {
                         std::cout << "    => Am detectat DHCPREQUEST. Construiesc DHCPACK..." << std::endl;
 
                         DhcpPacket ack;
-                        ack.header = packet.header; // Păstrăm xid-ul și MAC-ul clientului
+                        ack.header = packet.header; // Pastram xid-ul și MAC-ul clientului
                         
                         ack.header.op = 2; // BOOTREPLY
-                        // Confirmam adresa IP alocată
+                        // Confirmam adresa IP alocata
                         ack.header.yiaddr = inet_addr("192.168.100.10"); // nu este o selectie dinamica, este doar de testing
                         ack.header.siaddr = inet_addr("192.168.100.1");
 

@@ -3,7 +3,7 @@
 #include <iostream>
 
 bool DhcpPacket::parse(const uint8_t* buffer, size_t length) {
-    // Verificam dacă bufferul este suficient de mare macar pentru headerul fix
+    // Verificam daca bufferul este suficient de mare macar pentru headerul fix
     if (length < sizeof(DhcpHeader)) {
         return false; 
     }
@@ -28,8 +28,8 @@ std::vector<uint8_t> DhcpPacket::getOption(uint8_t code) const {
     while (i < options.size()) {
         uint8_t opt_code = options[i];
         
-        if (opt_code == 255) break; // Codul 255 inseamnă sfarsitul optiunilor
-        if (opt_code == 0) {        // Codul 0 este padding (se ignoră)
+        if (opt_code == 255) break; // Codul 255 inseamna sfarsitul optiunilor
+        if (opt_code == 0) {        // Codul 0 este padding (se ignora)
             i++;
             continue;
         }
@@ -67,7 +67,7 @@ std::vector<uint8_t> DhcpPacket::serialize() const {
     // 2. Adaugam optiunile existente
     buffer.insert(buffer.end(), options.begin(), options.end());
 
-    // 3. Adaugăm optiunea END (255) pentru a marca finalul pachetului
+    // 3. Adaugam optiunea END (255) pentru a marca finalul pachetului
     buffer.push_back(255);
     
     return buffer;
