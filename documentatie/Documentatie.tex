@@ -1,0 +1,370 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+% The preceding line is only needed to identify funding in the first footnote. If that is unneeded, please comment it out.
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[romanian]{babel}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{array}
+\usepackage{listings}
+
+% --- Denumiri in limba romana pentru elementele fixe ale clasei IEEEtran ---
+\renewcommand{\IEEEkeywordsname}{Cuvinte-cheie}
+\addto\captionsromanian{%
+  \renewcommand{\abstractname}{Rezumat}%
+  \renewcommand{\refname}{Bibliografie}%
+  \renewcommand{\tablename}{TABELUL}%
+}
+
+% --- Stilul blocurilor de cod (fara diacritice in interiorul lor) ---
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  columns=fullflexible,
+  keepspaces=true,
+  frame=single,
+  breaklines=true,
+  xleftmargin=2pt,
+  xrightmargin=2pt,
+  aboveskip=6pt,
+  belowskip=6pt
+}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\begin{document}
+
+\title{Proiectarea și implementarea unui server DHCP concurent cu persistența alocărilor}
+
+% DE VERIFICAT: facultatea si adresele de e-mail
+\author{\IEEEauthorblockN{Greavu Miruna-Ioana}
+\IEEEauthorblockA{Grupa C113D \\
+\textit{[Facultatea]} \\
+\textit{Academia Tehnică Militară ,,Ferdinand I''}\\
+București, România \\
+{[adresa de e-mail]}}
+\and
+\IEEEauthorblockN{Busuioc Mario-Gabriel}
+\IEEEauthorblockA{Grupa C113D \\
+\textit{[Facultatea]} \\
+\textit{Academia Tehnică Militară ,,Ferdinand I''}\\
+București, România \\
+{[adresa de e-mail]}}
+}
+
+\maketitle
+
+\begin{abstract}
+Lucrarea prezintă proiectarea și implementarea unui server DHCP care configurează automat stațiile dintr-o rețea locală. Serverul gestionează mai multe pool-uri de adrese și oferă trei moduri de alocare: statică, pe baza adresei fizice a clientului, dinamică, pe durata unui lease, și automată, permanentă. Înainte de a oferi o adresă, serverul verifică prin ARP și ICMP dacă aceasta este deja folosită în rețea. Lease-urile sunt urmărite pe tot ciclul lor de viață, de la alocare la reînnoire, eliberare și expirare, și sunt păstrate într-o bază de date, astfel încât starea serverului se reface după o repornire. Pe lângă adresa IP, clienții primesc masca de rețea, gateway-ul implicit, serverele DNS, numele de domeniu și alți parametri. Cererile sunt procesate în paralel de un grup de fire de execuție, sincronizate prin mutex-uri și semafoare, astfel încât aceeași adresă nu poate fi atribuită simultan la doi clienți. Funcționarea serverului este verificată într-o rețea virtuală izolată, alcătuită din două mașini virtuale.
+\end{abstract}
+
+\begin{IEEEkeywords}
+DHCP, lease, pool de adrese, detecția conflictelor, fire de execuție, mutex, semafor, persistență
+\end{IEEEkeywords}
+
+\section{Introducere}
+Orice stație dintr-o rețea IP are nevoie de o adresă unică, de masca subrețelei, de adresa gateway-ului implicit și de cea a serverelor DNS. Configurarea manuală a acestor parametri devine greu de întreținut pe măsură ce rețeaua crește și duce ușor la erori, cum ar fi două stații cu aceeași adresă. Protocolul DHCP (Dynamic Host Configuration Protocol), definit în RFC 2131 \cite{rfc2131}, rezolvă problema printr-un server central care distribuie automat configurația, iar opțiunile transmise clienților sunt standardizate în RFC 2132 \cite{rfc2132}.
+
+Scopul proiectului este realizarea unui server DHCP funcțional, care să acopere mai mult decât schimbul de bază de mesaje. Serverul trebuie să gestioneze mai multe pool-uri de adrese, să ofere alocare statică, dinamică și automată și să verifice adresele înainte de a le distribui. De asemenea, trebuie să urmărească durata lease-urilor, să furnizeze parametri suplimentari de rețea, să stocheze lease-urile într-o bază de date și să trateze corect cererile concurente.
+
+Lucrarea este organizată astfel. Secțiunea~\ref{sec:fundamente} prezintă noțiunile de bază ale protocolului. Secțiunea~\ref{sec:cerinte} enumeră cerințele funcționale, iar Secțiunea~\ref{sec:arhitectura} descrie arhitectura serverului. Secțiunea~\ref{sec:implementare} detaliază modul în care este realizată fiecare cerință. Secțiunea~\ref{sec:testare} descrie mediul și scenariile de testare, iar Secțiunea~\ref{sec:concluzii} prezintă concluziile.
+
+\section{Fundamente teoretice}\label{sec:fundamente}
+
+\subsection{Formatul mesajelor DHCP}
+DHCP folosește protocolul UDP: serverul ascultă pe portul 67, iar clientul pe portul 68. Un mesaj DHCP are o parte fixă de 236 de octeți, moștenită de la protocolul BOOTP, urmată de valoarea \textit{magic cookie} 99.130.83.99 și de o listă de opțiuni. Cele mai importante câmpuri ale părții fixe sunt:
+\begin{itemize}
+\item \texttt{op} --- tipul mesajului: cerere (1) sau răspuns (2);
+\item \texttt{xid} --- identificatorul tranzacției, ales de client, care leagă răspunsurile de cereri;
+\item \texttt{flags} --- bitul de broadcast, prin care clientul cere ca răspunsul să fie trimis prin difuzare;
+\item \texttt{ciaddr} --- adresa curentă a clientului, completată doar când clientul are deja o adresă validă;
+\item \texttt{yiaddr} --- adresa oferită sau alocată clientului de către server;
+\item \texttt{giaddr} --- adresa agentului releu, nenulă când mesajul a trecut printr-un router;
+\item \texttt{chaddr} --- adresa hardware (MAC) a clientului.
+\end{itemize}
+
+Opțiunile sunt codificate în format TLV (\textit{Type--Length--Value}): un octet pentru cod, un octet pentru lungime și valoarea propriu-zisă. Lista se încheie cu opțiunea 255 (\textit{End}). Tipul mesajului DHCP este transmis prin opțiunea 53.
+
+\subsection{Tipurile de mesaje și ciclul DORA}
+Un client nou obține configurația printr-un schimb de patru mesaje, numit ciclul DORA:
+\begin{enumerate}
+\item \textbf{DHCPDISCOVER} --- clientul, care nu are încă o adresă, caută servere DHCP printr-un mesaj de difuzare;
+\item \textbf{DHCPOFFER} --- serverul propune o adresă și parametrii de rețea;
+\item \textbf{DHCPREQUEST} --- clientul acceptă una dintre oferte și indică serverul ales prin opțiunea 54 (\textit{Server Identifier});
+\item \textbf{DHCPACK} --- serverul confirmă alocarea, iar din acest moment lease-ul este activ.
+\end{enumerate}
+
+În afara acestor patru mesaje, protocolul mai definește: DHCPNAK, prin care serverul refuză o cerere invalidă; DHCPDECLINE, prin care clientul anunță că adresa primită este deja folosită; DHCPRELEASE, prin care clientul eliberează adresa; și DHCPINFORM, prin care un client cu adresă configurată manual cere doar ceilalți parametri de rețea.
+
+\subsection{Lease-ul și timerele asociate}
+Un lease este dreptul unui client de a folosi o adresă pentru o perioadă limitată, numită durata lease-ului ($L$). Pentru a nu pierde adresa, clientul încearcă să o reînnoiască la două momente:
+\begin{equation}
+T_1 = 0{,}5 \cdot L, \qquad T_2 = 0{,}875 \cdot L .\label{eq:timere}
+\end{equation}
+La momentul $T_1$ clientul trimite serverului care i-a alocat adresa o cerere de reînnoire, direct (\textit{unicast}). Dacă nu primește răspuns până la $T_2$, trimite cererea prin difuzare, pentru a fi preluată de orice server disponibil. Dacă nici atunci nu reușește, la momentul $L$ adresa expiră, iar clientul trebuie să reia ciclul DORA.
+
+\section{Cerințe funcționale}\label{sec:cerinte}
+Tabelul~\ref{tab:cerinte} prezintă cerințele funcționale ale serverului și secțiunea în care este descrisă realizarea fiecăreia.
+
+\begin{table}[htbp]
+\caption{Cerințele funcționale ale serverului}
+\begin{center}
+\begin{tabular}{|c|p{5.3cm}|c|}
+\hline
+\textbf{Cod} & \textbf{Cerință} & \textbf{Secțiune} \\
+\hline
+RF1 & Gestiunea mai multor pool-uri de adrese & \ref{subsec:pool} \\
+\hline
+RF2 & Alocare statică, dinamică și automată & \ref{subsec:alocare} \\
+\hline
+RF3 & Verificarea adreselor prin ARP și ping & \ref{subsec:conflicte} \\
+\hline
+RF4 & Durata lease-ului, reînnoirea, eliberarea și expirarea & \ref{subsec:lease} \\
+\hline
+RF5 & Furnizarea de parametri suplimentari (gateway, DNS, domeniu etc.) & \ref{subsec:optiuni} \\
+\hline
+RF6 & Stocarea lease-urilor într-o bază de date & \ref{subsec:bd} \\
+\hline
+RF7 & Tratarea concurenței dintre firele de execuție, cu mutex-uri și semafoare & \ref{subsec:concurenta} \\
+\hline
+\end{tabular}
+\label{tab:cerinte}
+\end{center}
+\end{table}
+
+\section{Arhitectura serverului}\label{sec:arhitectura}
+% DE VERIFICAT: limbajul si platforma alese impreuna cu colegul
+Serverul este scris în limbajul C, pentru sistemul de operare Linux, și folosește biblioteca POSIX Threads pentru firele de execuție, mutex-uri și semafoare. Aplicația este împărțită în module cu responsabilități separate:
+\begin{itemize}
+\item \textbf{Modulul de configurare} citește la pornire un fișier text cu pool-urile, rezervările statice, parametrii de rețea și durata implicită a lease-urilor.
+\item \textbf{Receptorul} ascultă pe portul UDP 67, cu opțiunea \texttt{SO\_BROADCAST} activată, și pune mesajele primite într-o coadă de așteptare.
+\item \textbf{Grupul de fire de lucru} (\textit{thread pool}) preia mesajele din coadă și le procesează în paralel.
+\item \textbf{Parserul și serializatorul de pachete} transformă octeții primiți în structuri de date și construiesc răspunsurile, inclusiv lista de opțiuni TLV.
+\item \textbf{Managerul de pool-uri și lease-uri} păstrează în memorie starea fiecărei adrese și aplică regulile de alocare.
+\item \textbf{Detectorul de conflicte} verifică, prin ICMP și ARP, dacă o adresă este deja folosită în rețea.
+\item \textbf{Modulul de persistență} salvează lease-urile în baza de date și le reîncarcă la pornire.
+\item \textbf{Firul de curățare} (\textit{reaper}) eliberează periodic lease-urile și ofertele expirate.
+\item \textbf{Modulul de jurnalizare} înregistrează evenimentele: tipul mesajului, adresa MAC, adresa IP și momentul de timp.
+\end{itemize}
+
+La sosirea unui mesaj, receptorul îl adaugă în coadă, iar un fir de lucru liber îl preia, îl decodifică și determină tipul lui din opțiunea 53. În funcție de tip, firul apelează funcția de tratare corespunzătoare, care modifică starea lease-urilor și construiește răspunsul. Firul trimite apoi răspunsul și salvează modificările în baza de date.
+
+\section{Implementarea funcționalităților}\label{sec:implementare}
+
+\subsection{Gestiunea pool-urilor de adrese}\label{subsec:pool}
+Un pool reprezintă un interval continuu de adrese dintr-o subrețea, împreună cu parametrii care se transmit clienților din acea subrețea. Fiecare pool are un identificator, adresa subrețelei și masca ei, adresa de început și de sfârșit a intervalului, gateway-ul, serverele DNS, numele de domeniu și durata implicită a lease-ului. Adresa serverului, a gateway-ului și eventualele adrese excluse explicit nu sunt distribuite niciodată.
+
+Când clientul se află în aceeași rețea cu serverul, se folosește pool-ul care conține adresa interfeței pe care a sosit cererea. Când cererea a trecut printr-un agent releu, câmpul \texttt{giaddr} este nenul și se alege pool-ul care conține această adresă. Astfel, același server poate deservi mai multe subrețele.
+
+În memorie, fiecare adresă dintr-un pool are una dintre stările din Tabelul~\ref{tab:stari}.
+
+\begin{table}[htbp]
+\caption{Stările unei adrese din pool}
+\begin{center}
+\begin{tabular}{|l|p{5.2cm}|}
+\hline
+\textbf{Stare} & \textbf{Semnificație} \\
+\hline
+LIBERĂ & Poate fi oferită oricărui client. \\
+\hline
+OFERITĂ & A fost propusă printr-un DHCPOFFER și este blocată câteva secunde, în așteptarea răspunsului clientului. \\
+\hline
+ALOCATĂ & Este folosită de un client, pe baza unui lease activ. \\
+\hline
+REZERVATĂ & Este rezervată static pentru o anumită adresă MAC. \\
+\hline
+INDISPONIBILĂ & A fost găsită ocupată în rețea sau refuzată printr-un DHCPDECLINE și este ținută în carantină. \\
+\hline
+\end{tabular}
+\label{tab:stari}
+\end{center}
+\end{table}
+
+Configurația pool-urilor se citește dintr-un fișier text. Un exemplu, pentru rețeaua folosită la testare:
+% DE VERIFICAT: formatul fisierului si valorile din retea
+\begin{lstlisting}
+[pool lan]
+subnet      = 192.168.100.0/24
+range       = 192.168.100.100 - 192.168.100.200
+router      = 192.168.100.1
+dns         = 192.168.100.1, 8.8.8.8
+domain      = lab.local
+lease_time  = 3600
+
+[reservation]
+mac = 00:50:56:26:79:f5
+ip  = 192.168.100.50
+\end{lstlisting}
+
+\subsection{Tipurile de alocare}\label{subsec:alocare}
+Serverul oferă cele trei mecanisme de alocare definite în RFC 2131 \cite{rfc2131}:
+\begin{itemize}
+\item \textbf{Alocarea statică} (rezervarea). Administratorul leagă o adresă IP de adresa MAC a unui client, iar clientul primește întotdeauna aceeași adresă. Mecanismul este util pentru imprimante, servere sau echipamente care trebuie să fie mereu accesibile la aceeași adresă. Adresele rezervate nu sunt oferite altor clienți.
+\item \textbf{Alocarea dinamică}. Clientul primește o adresă liberă din pool pentru o durată limitată $L$. Dacă nu reînnoiește lease-ul, adresa revine în pool și poate fi oferită altui client. Acesta este modul implicit de funcționare.
+\item \textbf{Alocarea automată}. Clientul primește o adresă liberă din pool, dar permanent. Serverul transmite în opțiunea 51 valoarea \texttt{0xFFFFFFFF}, care înseamnă durată infinită, iar adresa nu expiră și nu este reciclată de firul de curățare.
+\end{itemize}
+
+Clientul este identificat prin opțiunea 61 (\textit{Client Identifier}), dacă aceasta există, altfel prin adresa MAC din câmpul \texttt{chaddr}. La primirea unui DHCPDISCOVER, adresa este aleasă în ordinea de preferință recomandată de standard: rezervarea statică a clientului, adresa pe care clientul o are deja sau a avut-o anterior, adresa cerută prin opțiunea 50 (\textit{Requested IP Address}), dacă este liberă și validă, iar în ultimul rând prima adresă liberă din pool. Căutarea adresei și marcarea ei ca OFERITĂ se fac într-o singură secțiune critică, sub mutex-ul tabelei de lease-uri. După eliberarea mutex-ului, adresa este verificată în rețea (Secțiunea~\ref{subsec:conflicte}): dacă este găsită ocupată, devine INDISPONIBILĂ și căutarea se reia, altfel serverul trimite DHCPOFFER. Dacă pool-ul nu mai are adrese libere, serverul nu răspunde cererii.
+
+
+\subsection{Verificarea adreselor prin ARP și ping}\label{subsec:conflicte}
+O adresă din pool poate fi totuși ocupată, de exemplu de o stație configurată manual. RFC 2131 \cite{rfc2131} recomandă ca serverul să verifice adresa înainte de a o oferi, iar serverul face acest lucru în două moduri:
+\begin{itemize}
+\item \textbf{ICMP Echo (ping)}: serverul trimite o cerere \textit{Echo Request} către adresa candidată și așteaptă un răspuns un timp scurt (de exemplu 500~ms). Orice răspuns înseamnă că adresa este folosită.
+\item \textbf{ARP}: când clientul se află în aceeași rețea cu serverul, acesta trimite o cerere ARP pentru adresa candidată. Metoda este mai sigură decât ping-ul, deoarece o stație poate bloca mesajele ICMP printr-un firewall, dar nu poate ignora cererile ARP fără să-și piardă conectivitatea.
+\end{itemize}
+
+Dacă se găsește un conflict, adresa este marcată INDISPONIBILĂ pentru o perioadă de carantină configurabilă, evenimentul este jurnalizat, iar serverul alege altă adresă. Același tratament se aplică atunci când un client trimite DHCPDECLINE, semn că el însuși a detectat un conflict după ce a primit adresa.
+
+Verificarea durează până la câteva sute de milisecunde, deci nu se face cât timp firul ține blocat mutex-ul tabelei de lease-uri. Adresa este mai întâi marcată OFERITĂ, ceea ce o face invizibilă pentru celelalte fire, apoi mutex-ul este eliberat și abia după aceea se face verificarea. Astfel, verificarea unei adrese nu blochează procesarea cererilor celorlalți clienți.
+
+\subsection{Durata lease-ului, reînnoirea și eliberarea}\label{subsec:lease}
+La confirmarea unei alocări (DHCPACK), serverul salvează momentul de început $t_0$ și calculează momentul expirării:
+\begin{equation}
+t_{\text{exp}} = t_0 + L .\label{eq:expirare}
+\end{equation}
+În răspuns sunt incluse opțiunile 51 (durata $L$), 58 ($T_1$) și 59 ($T_2$), calculate conform \eqref{eq:timere}.
+
+Mesajele DHCPREQUEST apar în patru situații diferite, pe care serverul le deosebește după conținutul mesajului:
+\begin{itemize}
+\item \textbf{Selecție} (din ciclul DORA): mesajul conține opțiunile 54 și 50. Dacă identificatorul din opțiunea 54 este al serverului, acesta confirmă adresa oferită; altfel, clientul a ales alt server, iar oferta este anulată.
+\item \textbf{Repornirea clientului}: mesajul conține opțiunea 50, dar nu și opțiunea 54. Serverul răspunde cu DHCPACK dacă adresa cerută aparține clientului și este validă în subrețea, altfel cu DHCPNAK.
+\item \textbf{Reînnoire} (la $T_1$) și \textbf{realocare} (la $T_2$): câmpul \texttt{ciaddr} este completat. Dacă lease-ul există, serverul îl prelungește, recalculând $t_{\text{exp}}$ conform \eqref{eq:expirare}.
+\end{itemize}
+
+La primirea unui DHCPRELEASE, adresa redevine LIBERĂ imediat. Serverul păstrează totuși asocierea dintre client și adresă, astfel încât, dacă adresa nu a fost ocupată între timp, același client o primește din nou la următoarea cerere. Clienții care nu trimit DHCPRELEASE, de exemplu pentru că au fost opriți brusc, sunt tratați de firul de curățare: acesta rulează periodic, la câteva secunde, readuce în starea LIBERĂ toate adresele cu $t_{\text{exp}}$ depășit și anulează ofertele la care clientul nu a răspuns în timpul alocat. Lease-urile automate și rezervările statice nu sunt atinse de firul de curățare.
+
+\subsection{Furnizarea parametrilor suplimentari}\label{subsec:optiuni}
+Pe lângă adresa IP, serverul transmite parametrii din Tabelul~\ref{tab:optiuni}, preluați din configurația pool-ului \cite{rfc2132}. Opțiunile obligatorii sunt incluse în fiecare DHCPOFFER și DHCPACK, iar celelalte sunt trimise dacă apar în lista de parametri ceruți de client (opțiunea 55).
+
+\begin{table}[htbp]
+\caption{Opțiunile DHCP furnizate de server}
+\begin{center}
+\begin{tabular}{|c|p{3cm}|p{2.6cm}|}
+\hline
+\textbf{Cod} & \textbf{Opțiune} & \textbf{Exemplu} \\
+\hline
+1 & Masca subrețelei & 255.255.255.0 \\
+\hline
+3 & Gateway implicit & 192.168.100.1 \\
+\hline
+6 & Servere DNS & 192.168.100.1, 8.8.8.8 \\
+\hline
+15 & Numele de domeniu & lab.local \\
+\hline
+28 & Adresa de broadcast & 192.168.100.255 \\
+\hline
+42 & Servere NTP & 192.168.100.1 \\
+\hline
+51 & Durata lease-ului & 3600 s \\
+\hline
+53 & Tipul mesajului & OFFER, ACK, NAK \\
+\hline
+54 & Identificatorul serverului & 192.168.100.1 \\
+\hline
+58 & Timpul de reînnoire $T_1$ & 1800 s \\
+\hline
+59 & Timpul de realocare $T_2$ & 3150 s \\
+\hline
+\end{tabular}
+\label{tab:optiuni}
+\end{center}
+\end{table}
+
+Același mecanism este folosit pentru DHCPINFORM: clientul are deja o adresă configurată manual, așa că serverul răspunde cu un DHCPACK care conține doar opțiunile cerute, fără să aloce o adresă și fără să creeze un lease.
+
+\subsection{Stocarea lease-urilor în baza de date}\label{subsec:bd}
+% DE VERIFICAT: sistemul de baze de date ales
+Pentru ca serverul să nu uite alocările făcute atunci când este oprit sau repornit, lease-urile sunt salvate într-o bază de date SQLite. SQLite a fost ales pentru că nu necesită un server de baze de date separat: întreaga bază este un singur fișier pe disc, accesat printr-o bibliotecă inclusă direct în aplicație. Structura tabelei este:
+\begin{lstlisting}[language=SQL]
+CREATE TABLE leases (
+  ip          TEXT PRIMARY KEY,
+  client_id   TEXT NOT NULL,    -- MAC / opt. 61
+  hostname    TEXT,             -- opt. 12
+  pool_id     TEXT NOT NULL,
+  type        INTEGER NOT NULL, -- 0 dinamic
+                                -- 1 static
+                                -- 2 automat
+  state       INTEGER NOT NULL,
+  start_time  INTEGER NOT NULL, -- timp Unix
+  expire_time INTEGER           -- NULL: permanent
+);
+CREATE INDEX idx_client ON leases(client_id);
+\end{lstlisting}
+
+Fiecare modificare a unui lease (alocare, reînnoire, eliberare, expirare, marcare ca indisponibilă) este scrisă în baza de date printr-o tranzacție. Tabela din memorie rămâne sursa folosită pentru deciziile de alocare, deoarece este mult mai rapidă, iar baza de date asigură persistența. La pornire, serverul încarcă lease-urile din baza de date, le elimină pe cele expirate între timp și reconstruiește starea fiecărei adrese din pool. Cele două structuri sunt astfel mereu sincronizate.
+
+\begin{table*}[!t]
+\caption{Scenariile de testare}
+\begin{center}
+\begin{tabular}{|c|p{5.4cm}|p{9.6cm}|}
+\hline
+\textbf{Nr.} & \textbf{Scenariu} & \textbf{Rezultat așteptat} \\
+\hline
+1 & Client nou: \texttt{sudo dhclient -v ens33} & Ciclul DORA complet; clientul primește o adresă din intervalul .100--.200, masca, gateway-ul, serverele DNS și domeniul. \\
+\hline
+2 & Client cu rezervare statică & Clientul primește întotdeauna adresa rezervată, indiferent de ordinea cererilor. \\
+\hline
+3 & Adresă ocupată de o stație configurată manual & Verificarea ARP sau ping detectează conflictul; adresa devine INDISPONIBILĂ, iar clientul primește altă adresă. \\
+\hline
+4 & Reînnoirea lease-ului (durată scurtă, de exemplu 60 s) & La $T_1$ clientul trimite DHCPREQUEST, iar serverul prelungește lease-ul și actualizează baza de date. \\
+\hline
+5 & Eliberarea adresei: \texttt{sudo dhclient -r ens33} & Serverul primește DHCPRELEASE și marchează imediat adresa ca LIBERĂ. \\
+\hline
+6 & Expirarea lease-ului (clientul este oprit brusc) & După $t_{\text{exp}}$, firul de curățare readuce adresa în starea LIBERĂ. \\
+\hline
+7 & Cerere pentru o adresă din altă subrețea & Serverul răspunde cu DHCPNAK, iar clientul reia ciclul DORA. \\
+\hline
+8 & Repornirea serverului & Lease-urile active sunt reîncărcate din baza de date, iar clienții își păstrează adresele. \\
+\hline
+9 & Cereri simultane de la mai mulți clienți simulați & Fiecare client primește o adresă diferită; nicio adresă nu este atribuită de două ori. \\
+\hline
+\end{tabular}
+\label{tab:teste}
+\end{center}
+\end{table*}
+
+\subsection{Tratarea concurenței}\label{subsec:concurenta}
+% DE VERIFICAT: modelul de concurenta (thread pool) si numarul de fire
+Mai mulți clienți pot trimite cereri în același timp, de exemplu când pornesc simultan toate calculatoarele dintr-un laborator. Serverul procesează aceste cereri în paralel, folosind modelul producător--consumator \cite{tanenbaum}:
+\begin{itemize}
+\item \textbf{Producătorul} este firul receptor, care citește mesajele de pe socket și le pune într-o coadă circulară de capacitate fixă $N$.
+\item \textbf{Consumatorii} sunt $K$ fire de lucru, create la pornire, care preiau mesajele din coadă și le procesează.
+\end{itemize}
+
+Coada este sincronizată cu două semafoare cu numărare și un mutex. Semaforul \textit{sem\_libere}, inițializat cu $N$, numără pozițiile libere din coadă și blochează producătorul când coada este plină. Semaforul \textit{sem\_ocupate}, inițializat cu 0, numără mesajele care așteaptă procesarea și blochează consumatorii când coada este goală. Mutex-ul \textit{mutex\_coada} asigură că doar un fir modifică indicii cozii la un moment dat. Fiecare fir de lucru rulează într-o buclă: așteaptă la \textit{sem\_ocupate} până când în coadă există un mesaj, îl extrage sub protecția lui \textit{mutex\_coada} și semnalează \textit{sem\_libere}, pentru ca producătorul să știe că s-a eliberat o poziție. Mesajul este procesat abia după eliberarea mutex-ului, astfel încât celelalte fire pot folosi coada în paralel.
+
+
+Resursa cea mai importantă este tabela de lease-uri, protejată de \textit{mutex\_lease}. Fără acest mutex, două fire care procesează simultan cererile a doi clienți ar putea găsi aceeași adresă liberă și ar putea-o oferi amândurora. Căutarea unei adrese libere și marcarea ei ca OFERITĂ se fac de aceea într-o singură secțiune critică (Secțiunea~\ref{subsec:alocare}). Secțiunile critice sunt păstrate cât mai scurte, iar operațiile lente, precum verificarea adresei prin ARP sau ICMP și trimiterea răspunsului, se fac în afara lor.
+
+Baza de date are propriul mutex, \textit{mutex\_bd}. Pentru a evita blocajele reciproce (\textit{deadlock}), mutex-urile sunt obținute mereu în aceeași ordine: \textit{mutex\_lease}, apoi \textit{mutex\_bd}, niciodată invers.
+
+Planificarea firelor este împărțită între sistemul de operare și aplicație. Planificatorul nucleului Linux distribuie timpul de procesor între firele aplicației. Aplicația stabilește în ce ordine sunt tratate cererile: coada FIFO garantează că mesajele sunt procesate în ordinea sosirii, iar numărul fix de fire de lucru limitează consumul de resurse la o încărcare mare. Firul de curățare rulează independent, la intervale regulate, și folosește același \textit{mutex\_lease} când modifică starea adreselor. Prin urmare, expirarea unui lease nu poate interfera cu o alocare aflată în desfășurare.
+
+\section{Testare și validare}\label{sec:testare}
+Testarea se face într-o rețea virtuală izolată, creată în VMware Workstation. Rețeaua conține două mașini virtuale cu Ubuntu 26.04 LTS, conectate la același segment LAN (\textit{LAN segment}), unde nu există niciun alt server DHCP:
+\begin{itemize}
+\item \textbf{dhcp-server}, cu adresa statică 192.168.100.1/24, pe care rulează serverul;
+\item \textbf{dhcp-client}, fără adresă configurată, care cere configurația cu utilitarul \texttt{dhclient}.
+\end{itemize}
+
+Izolarea este obligatorie: un server DHCP pornit într-o rețea reală, unde există deja un server DHCP, ar putea distribui adrese greșite celorlalte stații. Schimbul de mesaje este urmărit pe server cu \texttt{tcpdump} și Wireshark, iar pe client cu \texttt{dhclient -v}, care afișează fiecare pas al ciclului DORA. Tabelul~\ref{tab:teste} prezintă scenariile de testare și comportamentul așteptat.
+
+
+Scenariul 9 se poate realiza cu un client simulat, care trimite rapid mai multe mesaje DHCPDISCOVER cu adrese MAC diferite. La final se verifică în baza de date că nu există două lease-uri active pentru aceeași adresă IP.
+
+\section{Concluzii}\label{sec:concluzii}
+Lucrarea a prezentat proiectarea unui server DHCP care acoperă ciclul de viață complet al unei adrese: alegerea ei dintr-un pool, verificarea în rețea, alocarea statică, dinamică sau automată, reînnoirea, eliberarea și expirarea. Persistența în baza de date permite serverului să își refacă starea după o repornire. Procesarea concurentă, cu un grup de fire de lucru sincronizate prin semafoare și mutex-uri, permite tratarea simultană a mai multor clienți fără ca aceeași adresă să fie oferită de două ori.
+
+Serverul poate fi extins în mai multe direcții: suport complet pentru agenți releu și pentru opțiunea 82, funcționarea a două servere în configurație redundantă (\textit{failover}), o interfață de administrare pentru vizualizarea lease-urilor și a gradului de ocupare a pool-urilor și suport pentru DHCPv6, în rețelele IPv6.
+
+\begin{thebibliography}{00}
+\bibitem{rfc2131} R. Droms, ``Dynamic Host Configuration Protocol,'' RFC 2131, IETF, March 1997.
+\bibitem{rfc2132} S. Alexander and R. Droms, ``DHCP options and BOOTP vendor extensions,'' RFC 2132, IETF, March 1997.
+\bibitem{tanenbaum} A. S. Tanenbaum and H. Bos, \emph{Modern Operating Systems}, 4th ed. Boston, MA: Pearson, 2015.
+\end{thebibliography}
+
+\end{document}
